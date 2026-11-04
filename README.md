@@ -56,7 +56,7 @@ For progress the plugin cannot see on its own, Claude has a `report` tool:
 - **Reads files:** the output file of each background command Claude starts (the last 16 KB, for progress lines; files over 4 MiB are not read), and a file Claude passes as `watch` (its size, or its text to count lines). A `watch` path goes through your Read permission rules first.
 - **Watches every tool call** (`tool.call` hook): it notes the tool's name and a one-line summary of its input (the description, command, path or query) to draw a "running" row, and passes the call on unchanged. It never alters a call's input or result.
 - **Reads conversation messages** (`session.append` hook) only to spot background-task completion notices (`<task-notification>`), which close a row. Nothing else in a message is kept.
-- **Answers its own tool:** the `report` tool belongs to this plugin, so the plugin answers it itself. It stands in for no other tool.
+- **Stands in for one tool, its own:** `mcp__progress-bar__report`, every time Claude calls it. Claude Code serves a tool a plugin registers through that plugin's `tool.call` hook, so the hook answers the call itself instead of passing it on. Every other tool call goes through untouched, and the hook returns exactly what the tool gave back.
 - **Lists running subagents** every 2 s to show one row per agent.
 
 ## Commands
