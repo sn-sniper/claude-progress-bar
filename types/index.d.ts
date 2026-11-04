@@ -22,8 +22,9 @@ export type ProgressJob = {
   etaSeconds?: number
   detail?: string
   outputFile?: string
-  /** Shell snippet whose stdout's first number is the current `done`. */
-  probe?: string
+  /** File whose size (or line count) is the current `done`, set through the report tool. */
+  watch?: string
+  measure?: 'bytes' | 'lines'
 }
 
 export type PlanItem = { subject: string; status: 'pending' | 'in_progress' | 'completed'; activeForm?: string }

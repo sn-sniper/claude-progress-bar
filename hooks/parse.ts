@@ -99,14 +99,6 @@ export function parseProgress(text: string): Sample | undefined {
   return undefined
 }
 
-/** A probe prints `done` or `done/total`; anything after the numbers is ignored. */
-export function parseProbe(stdout: string): Pick<Sample, 'done' | 'total'> | undefined {
-  const pair = stdout.match(/(-?\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)/)
-  if (pair) return { done: Number(pair[1]), total: Number(pair[2]) }
-  const one = stdout.match(/-?\d+(?:\.\d+)?/)
-  return one ? { done: Number(one[0]) } : undefined
-}
-
 export type TaskNotice = { taskId: string; status: string }
 
 export function parseTaskNotices(text: string): TaskNotice[] {

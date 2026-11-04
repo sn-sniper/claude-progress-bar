@@ -47,7 +47,17 @@ Finished rows stay for 12 seconds with their total time, then clear.
 For progress the plugin cannot see on its own, Claude has a `report` tool:
 
 - **Phased work:** `label` and `total`, then `done` and `detail` after each phase, `status: "done"` at the end.
-- **Silent background commands:** `id` of the background task, `total`, `unit`, and a read-only `probe` command (such as `du -sb file` or `wc -l out.txt`) that the plugin polls every 2 s. A probe runs only when your permission rules already allow it as a Bash command.
+- **Silent background commands:** `id` of the background task, `total`, and `watch`, the absolute path of the file the command writes. The plugin checks that file's size every 2 s (or its line count, with `measure: "lines"`). A file is watched only when your permission rules already let Claude read it.
+
+## What it reads, runs and sends
+
+- **Sends nothing anywhere.** The plugin makes no network requests. Everything it learns is drawn in your terminal and kept in the session's own state.
+- **Starts no programs.** It runs no shell, no commands and no scripts.
+- **Reads files:** the output file of each background command Claude starts (the last 16 KB, for progress lines; files over 4 MiB are not read), and a file Claude passes as `watch` (its size, or its text to count lines). A `watch` path goes through your Read permission rules first.
+- **Watches every tool call** (`tool.call` hook): it notes the tool's name and a one-line summary of its input (the description, command, path or query) to draw a "running" row, and passes the call on unchanged. It never alters a call's input or result.
+- **Reads conversation messages** (`session.append` hook) only to spot background-task completion notices (`<task-notification>`), which close a row. Nothing else in a message is kept.
+- **Answers its own tool:** the `report` tool belongs to this plugin, so the plugin answers it itself. It stands in for no other tool.
+- **Lists running subagents** every 2 s to show one row per agent.
 
 ## Commands
 

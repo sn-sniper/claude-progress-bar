@@ -4,7 +4,7 @@ import type { AgentInfo, EngineInterface, Register } from 'claude-code'
 import type { PlanItem, ProgressJob } from '../types'
 import { registerBand } from './band'
 import { applySample, finish, newJob, patch, planJob, prune, upsert } from './jobs'
-import { parseOutputPath, parseProbe, parseProgress, parseTaskNotices } from './parse'
+import { parseOutputPath, parseProgress, parseTaskNotices } from './parse'
 import type { Sample } from './parse'
 
 type Engine = EngineInterface
@@ -25,7 +25,7 @@ const REPORT_DESCRIPTION = [
   "Shows live progress (bar, %, ETA) in the user's progress band above the prompt.",
   'Background Bash commands, TodoWrite/Task lists, subagents and workflows are tracked automatically; call this only to add what they cannot know:',
   '(1) multi-phase work of your own: call with label and total (phases), then done=<n> and detail=<current phase> after each phase, status="done" at the end;',
-  '(2) a background command whose output prints no percentage: id=<its background task id>, total=<expected bytes or items>, unit, and probe=<read-only shell command printing the current count, or "done/total">, polled every 2s.',
+  '(2) a background command whose output prints no percentage: id=<its background task id>, total=<expected bytes or lines>, and watch=<absolute path of the file it writes> (measure="lines" to count lines instead of bytes), polled every 2s.',
 ].join(' ')
 
 const str = (v: unknown) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined)
@@ -78,19 +78,30 @@ async function mutate($: Engine, fn: (jobs: Jobs, now: number) => Jobs) {
   await update($, nowAtom, () => now)
 }
 
+// $.fs.read refuses files over 4 MiB; past that a job keeps its last sample and shows elapsed time.
+const MAX_READ_BYTES = 4 * 1024 * 1024
+const TAIL_CHARS = 16384
+
+async function readSmall($: Engine, path: string): Promise<string | undefined> {
+  const { size } = await $.fs.stat(path)
+  return size <= MAX_READ_BYTES ? String(await $.fs.read(path)) : undefined
+}
+
 async function sample($: Engine, job: ProgressJob): Promise<Sample | undefined> {
   try {
-    if (job.probe) {
-      const ran = await $.process.run(['sh', '-c', job.probe], { timeoutMs: 5000 })
-      const probed = parseProbe(ran.stdout)
-      return probed && { ...probed, unit: job.unit ?? 'items' }
+    if (job.watch) {
+      if (job.measure === 'lines') {
+        const text = await readSmall($, job.watch)
+        return text === undefined ? undefined : { done: text.split('\n').length - 1, unit: 'items' }
+      }
+      return { done: (await $.fs.stat(job.watch)).size, unit: 'bytes' }
     }
     if (job.outputFile) {
-      const ran = await $.process.run(['tail', '-c', '16384', job.outputFile], { timeoutMs: 5000 })
-      return parseProgress(ran.stdout)
+      const text = await readSmall($, job.outputFile)
+      return text === undefined ? undefined : parseProgress(text.slice(-TAIL_CHARS))
     }
   } catch (err) {
-    // The output file may not exist yet, or a probe may hang once; the next poll tries again.
+    // The file may not exist yet; the next poll tries again.
     $.ui.log(`progress-bar: sampling ${job.id} failed: ${String(err)}`, { to: 'debug' })
   }
   return undefined
@@ -109,7 +120,7 @@ async function tick($: Engine) {
     if (now - lastPollAt >= POLL_MS) {
       lastPollAt = now
       for (const job of jobs) {
-        if (job.status !== 'running' || (!job.probe && !job.outputFile)) continue
+        if (job.status !== 'running' || (!job.watch && !job.outputFile)) continue
         const s = await sample($, job)
         if (s) samples.set(job.id, s)
       }
@@ -203,7 +214,8 @@ export const register: Register = on => {
           unit: { type: 'string', enum: ['items', 'bytes'] },
           eta_seconds: { type: 'number', description: 'Only when the work itself reports an ETA; otherwise it is computed.' },
           detail: { type: 'string', description: 'Current step, e.g. "Phase 3/5: running tests".' },
-          probe: { type: 'string', description: 'Read-only shell command printing the current count, or "done/total".' },
+          watch: { type: 'string', description: 'Absolute path of a file whose growth is the progress; polled every 2s.' },
+          measure: { type: 'string', enum: ['bytes', 'lines'], description: 'What `watch` counts: its size (default) or its lines.' },
           status: { type: 'string', enum: ['running', 'done', 'failed'] },
         },
       },
@@ -217,13 +229,14 @@ export const register: Register = on => {
     const input = e as unknown as Record<string, unknown>
     const label = str(input.label)
     const id = str(input.id) ?? `report:${label ?? 'progress'}`
-    const probe = str(input.probe)
+    const watch = str(input.watch)
+    const measure = input.measure === 'lines' ? 'lines' : 'bytes'
 
-    if (probe) {
-      // The probe runs every 2s outside the Bash tool, so it must be something the person's rules already allow.
-      const verdict = await $.tool.check({ tool: 'Bash', input: { command: probe, description: 'progress probe' } })
+    if (watch) {
+      // The file is read every 2s outside the Read tool, so it must be one the person's rules already let Claude read.
+      const verdict = await $.tool.check({ tool: 'Read', input: { file_path: watch } })
       if (verdict.decision !== 'allow') {
-        return { result: `Probe not accepted: the permission rules answer "${verdict.decision}" for it. Use a read-only command such as stat, du or wc, or report done/percent yourself.` }
+        return { result: `Watch not accepted: the permission rules answer "${verdict.decision}" for reading ${watch}. Report done/percent yourself instead.` }
       }
     }
 
@@ -234,7 +247,7 @@ export const register: Register = on => {
       const existing = jobs.find(j => j.id === id)
       let job = existing ?? newJob({ id, kind: 'report', label: label ?? 'Progress' }, now)
       if (label && existing?.kind === 'report') job = { ...job, label }
-      if (probe) job = { ...job, probe, unit: unit ?? job.unit }
+      if (watch) job = { ...job, watch, measure, unit: measure === 'lines' ? 'items' : 'bytes' }
       job = applySample(job, {
         fraction: percent === undefined ? undefined : percent / 100,
         done: num(input.done),
@@ -245,7 +258,7 @@ export const register: Register = on => {
       }, now)
       return upsert(jobs, status ? finish(job, status, now) : job)
     })
-    return { result: `Progress band updated for "${label ?? id}"${probe ? '; probe polled every 2s' : ''}.` }
+    return { result: `Progress band updated for "${label ?? id}"${watch ? `; watching ${watch} every 2s` : ''}.` }
   })
 
   on('tool.call', async ($, e, next) => {
