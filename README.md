@@ -6,7 +6,7 @@ A Claude Code plugin that draws live progress bars above the prompt: percent, si
 ⠸ apt-get upgrade                 ███████████████████░░░░░░░░░░░  64%  ETA 1m12s
 ⠼ Plan                            ████████░░░░░░░░░░░░░░░░░░░░░░   3/8  ETA 4m05s  · Running tests
 ⠦ Explore: find auth handlers     ░░░░░░███░░░░░░░░░░░░░░░░░░░░░  48s
-✓ download kali.iso               ██████████████████████████████  done in 6m31s
+✓ download file.pdf               ██████████████████████████████  done in 6m31s
 ```
 
 ## Install
