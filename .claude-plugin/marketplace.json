@@ -1,0 +1,12 @@
+{
+  "name": "claude-progress-bar",
+  "owner": { "name": "sn-sniper" },
+  "metadata": { "description": "Live progress bars for Claude Code." },
+  "plugins": [
+    {
+      "name": "progress-bar",
+      "source": "./",
+      "description": "Live progress bars with %, speed and ETA for background commands, task lists, subagents, workflows and long tool calls."
+    }
+  ]
+}
