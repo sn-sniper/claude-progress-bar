@@ -1,11 +1,14 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, EngineInterface, Register } from 'claude-code'
 
-import type { PlanItem, ProgressJob } from '../types'
+import type { PlanItem, ProgressJob, RunHistory, Step } from '../types'
 import { registerBand } from './band'
+import { currentStep, estimate, recordRun, stepCounts, trimHistory } from './estimate'
+import type { Seen } from './estimate'
 import { applySample, finish, newJob, patch, planJob, prune, upsert } from './jobs'
 import { parseOutputPath, parseProgress, parseTaskNotices } from './parse'
 import type { Sample } from './parse'
+import { parseSteps } from './steps'
 
 type Engine = EngineInterface
 type Jobs = ProgressJob[]
@@ -87,18 +90,94 @@ async function readSmall($: Engine, path: string): Promise<string | undefined> {
   return size <= MAX_READ_BYTES ? String(await $.fs.read(path)) : undefined
 }
 
-async function sample($: Engine, job: ProgressJob): Promise<Sample | undefined> {
+const HISTORY_KEY = 'history'
+// Module state mirrors the store: a reload reads it back on first use.
+let history: Record<string, RunHistory> | undefined
+
+async function loadHistory($: Engine): Promise<Record<string, RunHistory>> {
+  history ??= ((await $.store.get(HISTORY_KEY)) ?? {}) as Record<string, RunHistory>
+  return history
+}
+
+async function remember($: Engine, jobs: ProgressJob[], now: number) {
+  const all = { ...(await loadHistory($)) }
+  for (const job of jobs) {
+    if (!job.historyKey) continue
+    // One last look, so the counts printed at the very end (a test summary) are learned too.
+    const seen = await readSeen($, job, true)
+    const polled = seen ? estimate(job, seen, all[job.historyKey], now) : undefined
+    const final = polled ? { ...job, observed: polled.observed } : job
+    all[job.historyKey] = recordRun(all[job.historyKey], final, now, seen ? stepCounts(job, seen) : {})
+  }
+  history = trimHistory(all)
+  await $.store.set(HISTORY_KEY, history)
+}
+
+// Logs a command redirects into are read every 2s outside the Read tool, so each must be one the person's
+// rules already let Claude read; the rest are dropped and that step falls back to the task output.
+async function readableSteps($: Engine, steps: Step[]): Promise<Step[]> {
+  const out: Step[] = []
+  for (const step of steps) {
+    const logs: string[] = []
+    for (const path of step.logs) {
+      const verdict = await $.tool.check({ tool: 'Read', input: { file_path: path } })
+      if (verdict.decision === 'allow') logs.push(path)
+    }
+    out.push({ ...step, logs })
+  }
+  return out
+}
+
+async function statOrUndefined($: Engine, path: string) {
+  try {
+    const { size, mtimeMs } = await $.fs.stat(path)
+    return { size, mtimeMs }
+  } catch {
+    // Not created yet: the step that writes it has not started.
+    return undefined
+  }
+}
+
+/** The task output's tail, plus every step log's stat and, for the running step (or all, at the finish), its tail. */
+async function readSeen($: Engine, job: ProgressJob, isFinal = false): Promise<Seen | undefined> {
+  if (!job.outputFile) return undefined
+  const output = (await readSmall($, job.outputFile))?.slice(-TAIL_CHARS)
+  const seen: Seen = { output, logs: {} }
+  const steps = job.steps ?? []
+  for (const path of steps.flatMap(s => s.logs)) seen.logs[path] = await statOrUndefined($, path)
+  const at = currentStep(job, seen)
+  for (const [i, step] of steps.entries()) {
+    if (!isFinal && i !== at) continue
+    for (const path of step.logs) {
+      const s = seen.logs[path]
+      if (s && s.size <= MAX_READ_BYTES) seen.logs[path] = { ...s, text: String(await $.fs.read(path)).slice(-TAIL_CHARS) }
+    }
+  }
+  return seen
+}
+
+type Polled = { sample: Sample; patch?: Partial<ProgressJob> }
+
+async function sample($: Engine, job: ProgressJob): Promise<Polled | undefined> {
   try {
     if (job.watch) {
       if (job.measure === 'lines') {
         const text = await readSmall($, job.watch)
-        return text === undefined ? undefined : { done: text.split('\n').length - 1, unit: 'items' }
+        return text === undefined ? undefined : { sample: { done: text.split('\n').length - 1, unit: 'items' } }
       }
-      return { done: (await $.fs.stat(job.watch)).size, unit: 'bytes' }
+      return { sample: { done: (await $.fs.stat(job.watch)).size, unit: 'bytes' } }
+    }
+    if (job.historyKey) {
+      const seen = await readSeen($, job)
+      if (!seen) return undefined
+      const past = (await loadHistory($))[job.historyKey]
+      const e = estimate(job, seen, past, await $.clock.now())
+      return { sample: e.sample, patch: { isEstimate: e.isEstimate, step: e.step, observed: e.observed } }
     }
     if (job.outputFile) {
       const text = await readSmall($, job.outputFile)
-      return text === undefined ? undefined : parseProgress(text.slice(-TAIL_CHARS))
+      const s = text === undefined ? undefined : parseProgress(text.slice(-TAIL_CHARS))
+      return s && { sample: s }
     }
   } catch (err) {
     // The file may not exist yet; the next poll tries again.
@@ -115,7 +194,7 @@ async function tick($: Engine) {
     const jobs = await read($, jobsAtom)
     if (jobs.length === 0) return
 
-    const samples = new Map<string, Sample>()
+    const samples = new Map<string, Polled>()
     let agents: AgentInfo[] | undefined
     if (now - lastPollAt >= POLL_MS) {
       lastPollAt = now
@@ -130,7 +209,7 @@ async function tick($: Engine) {
     await mutate($, (current, at) => {
       const sampled = current.map(j => {
         const s = samples.get(j.id)
-        return s && j.status === 'running' ? applySample(j, s, at) : j
+        return s && j.status === 'running' ? { ...applySample(j, s.sample, at), ...s.patch } : j
       })
       return agents ? syncAgents(sampled, agents, at) : sampled
     })
@@ -152,8 +231,13 @@ async function afterTool($: Engine, tool: string, input: Record<string, unknown>
     case 'Bash': {
       const taskId = str(r.backgroundTaskId)
       if (!taskId) return
-      const label = str(input.description) ?? str(input.command) ?? 'background command'
-      await mutate($, (jobs, now) => upsert(jobs, newJob({ id: taskId, kind: 'shell', label, outputFile: parseOutputPath(text) }, now)))
+      const command = str(input.command)
+      const label = str(input.description) ?? command ?? 'background command'
+      const parsed = command ? parseSteps(command, { home: await $.env.get('HOME'), cwd: await $.session.cwd() }) : undefined
+      const steps = parsed ? await readableSteps($, parsed.steps) : undefined
+      await mutate($, (jobs, now) =>
+        upsert(jobs, newJob({ id: taskId, kind: 'shell', label, outputFile: parseOutputPath(text), steps, historyKey: parsed?.key }, now)),
+      )
       return
     }
     case 'Workflow': {
@@ -286,9 +370,14 @@ export const register: Register = on => {
     if (text.includes('<task-notification>')) {
       const notices = parseTaskNotices(text)
       if (notices.length > 0) {
+        const succeeded = (await read($, jobsAtom)).filter(
+          j => j.historyKey && j.status === 'running' && notices.some(n => n.taskId === j.id && n.status === 'completed'),
+        )
         await mutate($, (jobs, now) =>
           notices.reduce((acc, n) => patch(acc, n.taskId, j => finish(j, n.status === 'completed' ? 'done' : 'failed', now)), jobs),
         )
+        // Only successful runs teach timings: a failure stops early and would shorten every later estimate.
+        if (succeeded.length > 0) await remember($, succeeded, await $.clock.now())
       }
     }
     return next(e)

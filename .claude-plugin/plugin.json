@@ -1,6 +1,6 @@
 {
   "name": "progress-bar",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Live progress bars with %, speed and ETA for background commands, task lists, subagents, workflows and long tool calls.",
   "author": { "name": "sn-sniper", "url": "https://github.com/sn-sniper" },
   "repository": "https://github.com/sn-sniper/claude-progress-bar",

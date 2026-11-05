@@ -11,7 +11,8 @@ const nowAtom = atom({ plugin: 'progress-bar', key: 'now' } as const, 0)
 
 function describe(job: ProgressJob, now: number): string {
   const parts: string[] = []
-  if (job.fraction !== undefined) parts.push(`${Math.floor(job.fraction * 100)}%`.padStart(4))
+  // `~` marks a percentage guessed from earlier runs rather than printed by the work itself.
+  if (job.fraction !== undefined) parts.push(`${job.isEstimate && job.status === 'running' ? '~' : ''}${Math.floor(job.fraction * 100)}%`.padStart(5))
   if (job.unit === 'bytes' && job.done !== undefined) {
     parts.push(job.total ? `${fmtBytes(job.done)}/${fmtBytes(job.total)}` : fmtBytes(job.done))
     if (job.status === 'running' && job.rate) parts.push(`${fmtBytes(job.rate)}/s`)

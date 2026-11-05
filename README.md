@@ -5,6 +5,7 @@ A Claude Code plugin that draws live progress bars above the prompt: percent, si
 ```
 ⠸ apt-get upgrade                 ███████████████████░░░░░░░░░░░  64%  ETA 1m12s
 ⠼ Plan                            ████████░░░░░░░░░░░░░░░░░░░░░░   3/8  ETA 4m05s  · Running tests
+⠴ Commit, test, build the APK     ███████████░░░░░░░░░░░░░░░░░░░  ~37%  ETA 4m43s  · step 2/4: tests 666/1332
 ⠦ Explore: find auth handlers     ░░░░░░███░░░░░░░░░░░░░░░░░░░░░  48s
 ✓ download file.pdf               ██████████████████████████████  done in 6m31s
 ```
@@ -33,7 +34,9 @@ Everything below is picked up automatically, with no tokens spent:
 
 | Source | What the row shows |
 | --- | --- |
-| Background `Bash` commands | Progress parsed from the command's output: `42%`, `12.3MiB/80MiB`, `[3/10]`, `step 4 of 9`, tqdm, apt, aria2c, `dd`, speed and `ETA` lines |
+| Background `Bash` commands | Progress parsed from the command's output: `42%`, `12.3MiB/80MiB`, `[3/10]`, `step 4 of 9`, tqdm, apt, aria2c, `dd`, Gradle, cargo, jest, `flutter test` counts, speed and `ETA` lines |
+| Chained commands (`a && b; c`) | `step 2/4: tests 540/1332`: which step is running, from the log files each step writes to and the `echo` lines between steps |
+| Any command run before | `~62%` and an ETA from the last runs of the same command: how long each step took and how many tests it counted. `~` marks an estimate |
 | `TodoWrite` / `TaskCreate` lists | One **Plan** row: completed/total, the current item, ETA from the average step |
 | Subagents | One row per running agent, closed when it finishes or fails |
 | Workflows | One row per run, closed on its completion notice |
@@ -53,7 +56,8 @@ For progress the plugin cannot see on its own, Claude has a `report` tool:
 
 - **Sends nothing anywhere.** The plugin makes no network requests. Everything it learns is drawn in your terminal and kept in the session's own state.
 - **Starts no programs.** It runs no shell, no commands and no scripts.
-- **Reads files:** the output file of each background command Claude starts (the last 16 KB, for progress lines; files over 4 MiB are not read), and a file Claude passes as `watch` (its size, or its text to count lines). A `watch` path goes through your Read permission rules first.
+- **Reads files:** the output file of each background command Claude starts (the last 16 KB, for progress lines; files over 4 MiB are not read), the log files that command redirects or tees into, and a file Claude passes as `watch` (its size, or its text to count lines). Log and `watch` paths go through your Read permission rules first; a log your rules don't allow is skipped.
+- **Remembers timings:** after a background command succeeds, its duration, each step's duration and each step's final count go into the plugin's own store (`$.store`, on this machine), keyed by the command's shape (working directory and step names; commit messages, numbers and quoted text left out). At most 200 commands are kept.
 - **Watches every tool call** (`tool.call` hook): it notes the tool's name and a one-line summary of its input (the description, command, path or query) to draw a "running" row, and passes the call on unchanged. It never alters a call's input or result.
 - **Reads conversation messages** (`session.append` hook) only to spot background-task completion notices (`<task-notification>`), which close a row. Nothing else in a message is kept.
 - **Stands in for one tool, its own:** `mcp__progress-bar__report`, every time Claude calls it. Claude Code serves a tool a plugin registers through that plugin's `tool.call` hook, so the hook answers the call itself instead of passing it on. Every other tool call goes through untouched, and the hook returns exactly what the tool gave back.

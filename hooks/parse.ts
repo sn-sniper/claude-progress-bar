@@ -33,6 +33,12 @@ const ETA_CLOCK = /\b(?:ETA|remaining|left)[:\s]*(?:(\d+):)?(\d{1,2}):(\d{2})\b/
 const TQDM_REMAINING = /<(?:(\d+):)?(\d{1,2}):(\d{2})[,\]]/
 const SPEED = /(\d+(?:\.\d+)?)\s?([KMGT]i?B|B)\/s\b/i
 const DD_COPIED = /^(\d+) bytes\b.*\bcopied\b/
+// `flutter test` / `dart test`: "01:23 +120 ~2 -1: name". A running count with no total; history supplies one.
+const DART_TEST = /^(?:\d+:)?\d{1,2}:\d{2} \+(\d+)(?: ~(\d+))?(?: -(\d+))?:/
+// jest/vitest summary: "Tests: 1 failed, 40 passed, 41 total".
+const JEST_TOTAL = /^Tests?:?\s+(?:(\d+) failed,\s*)?(?:\d+ skipped,\s*)?(\d+) passed,\s*(\d+) total/i
+// cargo: "Building [=====>     ] 120/250: crate".
+const CARGO_COUNT = /\]\s+(\d+)\/(\d+)\b/
 
 const unitsToSeconds = (s: string): number | undefined => {
   let total = 0
@@ -60,7 +66,10 @@ function parseLine(line: string): Sample | undefined {
   }
 
   if (sample.fraction === undefined) {
-    const count = line.match(BRACKET_COUNT) ?? line.match(WORD_COUNT)
+    const jest = line.match(JEST_TOTAL)
+    const count = jest
+      ? [line, String(Number(jest[1] ?? 0) + Number(jest[2])), jest[3]]
+      : line.match(BRACKET_COUNT) ?? line.match(WORD_COUNT) ?? line.match(CARGO_COUNT)
     if (count) {
       const done = Number(count[1])
       const total = Number(count[2])
@@ -72,6 +81,11 @@ function parseLine(line: string): Sample | undefined {
   // It beats a size-derived fraction: tools round the sizes they print (aria2c: "8.0GiB/13GiB" is 62%, its own 58% is right).
   const pct = [...line.matchAll(PERCENT)].map(m => parseFloat(m[1] ?? '')).filter(p => p <= 100).at(-1)
   if (pct !== undefined) sample.fraction = pct / 100
+
+  if (sample.fraction === undefined && sample.done === undefined) {
+    const dart = line.match(DART_TEST)
+    if (dart) Object.assign(sample, { done: Number(dart[1]) + Number(dart[2] ?? 0) + Number(dart[3] ?? 0), unit: 'items' })
+  }
 
   if (sample.fraction === undefined) {
     const dd = line.match(DD_COPIED)
